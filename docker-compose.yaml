@@ -17,6 +17,10 @@ services:
         published: 9991
         protocol: tcp
         mode: bridge
+    networks:
+      - shared-network
+    environment:
+      - REDIS_ADDR=redis:6379
     command:
       - -prometheusx.listen-address=:9990
       - -output=/local/tcpinfo
@@ -39,3 +43,7 @@ services:
         delay: 5s
     command:
       - -tcpinfo.eventsocket=/local/tcpevents.sock
+
+networks:
+  shared-network:
+    external: true

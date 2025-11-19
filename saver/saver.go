@@ -9,6 +9,7 @@
 package saver
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"github.com/m-lab/tcp-info/inetdiag"
 	"github.com/m-lab/tcp-info/metrics"
 	"github.com/m-lab/tcp-info/netlink"
+	redisclient "github.com/m-lab/tcp-info/redis"
 	"github.com/m-lab/tcp-info/tcp"
 	"github.com/m-lab/tcp-info/zstd"
 	"github.com/m-lab/uuid"
@@ -211,6 +213,7 @@ type Saver struct {
 	stats       stats
 	eventServer eventsocket.Server
 	exclude     *netlink.ExcludeConfig
+	redisClient *redisclient.Client
 }
 
 // NewSaver creates a new Saver for the given host and pod.  numMarshaller controls
@@ -229,6 +232,17 @@ func NewSaver(host string, pod string, numMarshaller int, srv eventsocket.Server
 		m = append(m, newMarshaller(wg, anon))
 	}
 
+	// Initialize Redis client
+	var redisClient *redisclient.Client
+	ctx := context.Background()
+	rc, err := redisclient.NewClient(ctx)
+	if err != nil {
+		log.Printf("Warning: Failed to connect to Redis: %v. Continuing without Redis support.", err)
+		redisClient = nil
+	} else {
+		redisClient = rc
+	}
+
 	return &Saver{
 		Host:         host,
 		Pod:          pod,
@@ -240,6 +254,7 @@ func NewSaver(host string, pod string, numMarshaller int, srv eventsocket.Server
 		cache:        c,
 		eventServer:  srv,
 		exclude:      ex,
+		redisClient:  redisClient,
 	}
 }
 
@@ -253,7 +268,7 @@ func (svr *Saver) queue(msg *netlink.ArchivalRecord) error {
 	}
 	cookie := idm.ID.Cookie()
 	if cookie == 0 {
-		return errors.New("Cookie = 0")
+		return errors.New("cookie = 0")
 	}
 	if len(svr.MarshalChans) < 1 {
 		return ErrNoMarshallers
@@ -284,6 +299,18 @@ func (svr *Saver) queue(msg *netlink.ArchivalRecord) error {
 		}
 	}
 	q <- Task{msg, conn.Writer}
+
+	// Write to Redis if client is available
+	if svr.redisClient != nil {
+		connUUID := uuid.FromCookie(cookie)
+		ctx := context.Background()
+		// Append TCPInfo to Redis time-series list at table_1:<uuid>
+		if err := svr.redisClient.AppendTCPInfo(ctx, connUUID, msg); err != nil {
+			log.Printf("Warning: failed to write to Redis: %v", err)
+			// Don't return error - Redis is optional, file writing is primary
+		}
+	}
+
 	return nil
 }
 
@@ -492,6 +519,16 @@ func (svr *Saver) Close() {
 	for i := range svr.MarshalChans {
 		close(svr.MarshalChans[i])
 	}
+
+	// Close Redis connection if it exists
+	if svr.redisClient != nil {
+		if err := svr.redisClient.Close(); err != nil {
+			log.Printf("Error closing Redis client: %v", err)
+		} else {
+			log.Println("Redis client closed")
+		}
+	}
+
 	svr.Done.Done()
 }
 
