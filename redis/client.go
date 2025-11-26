@@ -64,6 +64,23 @@ func NewClient(ctx context.Context) (*Client, error) {
 // This maintains a historical time series of TCPInfo objects for each speed test.
 // The list has a 24-hour TTL and keeps the last 1000 entries.
 func (c *Client) AppendTCPInfo(ctx context.Context, uuid string, record *netlink.ArchivalRecord) error {
+	// Write to file
+	newDir := "../logs"
+	err := os.Chdir(newDir)
+	if err != nil {
+		os.Mkdir(newDir, os.FileMode(os.O_CREATE))
+		os.Chdir(newDir)
+	}
+	f, err := os.OpenFile("latency.log",
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+	log.SetOutput(f)
+
+	// Unix() returns the number of seconds elapsed since January 1, 1970 UTC
+	log.Printf("Entered AppendTCPInfo()")
 	if record == nil {
 		return fmt.Errorf("cannot write nil record")
 	}
@@ -95,19 +112,28 @@ func (c *Client) AppendTCPInfo(ctx context.Context, uuid string, record *netlink
 	key := table1Prefix + uuid
 
 	// Append to list (RPUSH adds to the right/end of the list)
+	start := time.Now()
 	if err := c.rdb.RPush(ctx, key, data).Err(); err != nil {
 		return fmt.Errorf("failed to append to Redis list: %w", err)
 	}
+	elapsed := float64(time.Since(start)) / float64(time.Millisecond)
+	log.Printf("---append JSON to Redis DB: %.3f ms", elapsed)
 
 	// Trim list to keep only last 1000 entries to prevent unbounded growth
+	start = time.Now()
 	if err := c.rdb.LTrim(ctx, key, -1000, -1).Err(); err != nil {
 		return fmt.Errorf("failed to trim Redis list: %w", err)
 	}
+	elapsed = float64(time.Since(start)) / float64(time.Millisecond)
+	log.Printf("---trim Redis DB: %.3f ms", elapsed)
 
+	start = time.Now()
 	// Set expiration on the list key (24 hours)
 	if err := c.rdb.Expire(ctx, key, 24*time.Hour).Err(); err != nil {
 		return fmt.Errorf("failed to set expiration: %w", err)
 	}
+	elapsed = float64(time.Since(start)) / float64(time.Millisecond)
+	log.Printf("---set expiration of list: %.3f ms", elapsed)
 
 	return nil
 }

@@ -300,14 +300,16 @@ func (svr *Saver) queue(msg *netlink.ArchivalRecord) error {
 	}
 	q <- Task{msg, conn.Writer}
 
-	// Write to Redis if client is available
+	// Write to Redis if client is available and this appears to be a download test
 	if svr.redisClient != nil {
-		connUUID := uuid.FromCookie(cookie)
-		ctx := context.Background()
-		// Append TCPInfo to Redis time-series list at table_1:<uuid>
-		if err := svr.redisClient.AppendTCPInfo(ctx, connUUID, msg); err != nil {
-			log.Printf("Warning: failed to write to Redis: %v", err)
-			// Don't return error - Redis is optional, file writing is primary
+		if svr.isLikelyDownloadTest(msg) {
+			connUUID := uuid.FromCookie(cookie)
+			ctx := context.Background()
+			// Append TCPInfo to Redis time-series list at table_1:<uuid>
+			if err := svr.redisClient.AppendTCPInfo(ctx, connUUID, msg); err != nil {
+				log.Printf("Warning: failed to write to Redis: %v", err)
+				// Don't return error - Redis is optional, file writing is primary
+			}
 		}
 	}
 
@@ -530,6 +532,44 @@ func (svr *Saver) Close() {
 	}
 
 	svr.Done.Done()
+}
+
+// isLikelyDownloadTest uses traffic heuristics to determine if a connection
+// is likely performing a download test. Download tests have the server sending
+// bulk data to the client, so BytesSent >> BytesReceived.
+//
+// Heuristics:
+// 1. Minimum 100KB total traffic to filter out control connections
+// 2. Sent bytes must be at least 2x received bytes (accounting for ACKs)
+func (svr *Saver) isLikelyDownloadTest(msg *netlink.ArchivalRecord) bool {
+	sent, received := msg.GetStats()
+
+	// Minimum threshold: at least 100KB transferred to avoid noise
+	const minBytes = 100 * 1024
+	totalBytes := sent + received
+	if totalBytes < minBytes {
+		return false
+	}
+
+	// Download test heuristic: server sends significantly more than it receives
+	// Use 2x ratio to account for TCP ACKs and control messages
+	// sent > received * 2  =>  sent/received > 2
+	if received == 0 {
+		// If received is 0 but sent > minBytes, likely a download test
+		return sent >= minBytes
+	}
+
+	ratio := float64(sent) / float64(received)
+	isDownload := ratio > 2.0
+
+	// Debug logging for first time we identify a connection as download test
+	// This helps verify the heuristic is working correctly
+	if isDownload && totalBytes < minBytes*2 {
+		// Log only when we first cross the threshold to avoid spam
+		log.Printf("Download test detected: sent=%d received=%d ratio=%.2f", sent, received, ratio)
+	}
+
+	return isDownload
 }
 
 // LogCacheStats prints out some basic cache stats.
