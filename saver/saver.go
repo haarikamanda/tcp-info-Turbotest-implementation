@@ -261,6 +261,7 @@ func NewSaver(host string, pod string, numMarshaller int, srv eventsocket.Server
 // queue queues a single ArchivalRecord to the appropriate marshalling queue, based on the
 // connection Cookie.
 func (svr *Saver) queue(msg *netlink.ArchivalRecord) error {
+	log := getSaverLogger()
 	idm, err := msg.RawIDM.Parse()
 	if err != nil {
 		log.Println(err)
@@ -303,6 +304,7 @@ func (svr *Saver) queue(msg *netlink.ArchivalRecord) error {
 	// Write to Redis if client is available and this appears to be a download test
 	if svr.redisClient != nil {
 		if svr.isLikelyDownloadTest(msg) {
+			log.Printf("Is download test!")
 			connUUID := uuid.FromCookie(cookie)
 			ctx := context.Background()
 			// Append TCPInfo to Redis time-series list at table_1:<uuid>
@@ -534,6 +536,23 @@ func (svr *Saver) Close() {
 	svr.Done.Done()
 }
 
+// Add this helper function to get a logger that writes to both stdout and file
+func getSaverLogger() *log.Logger {
+	logFile := "/logs/saver.log"
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("Warning: Failed to open saver.log: %v", err)
+		return log.Default()
+	}
+	// DON'T defer f.Close() here - the file will be closed before logs are written
+	// Write to both stdout and file
+	multiWriter := io.MultiWriter(os.Stdout, f)
+	logger := log.New(multiWriter, "", log.LstdFlags)
+	
+	// Force flush after each write
+	return logger
+}
+
 // isLikelyDownloadTest uses traffic heuristics to determine if a connection
 // is likely performing a download test. Download tests have the server sending
 // bulk data to the client, so BytesSent >> BytesReceived.
@@ -542,32 +561,48 @@ func (svr *Saver) Close() {
 // 1. Minimum 100KB total traffic to filter out control connections
 // 2. Sent bytes must be at least 2x received bytes (accounting for ACKs)
 func (svr *Saver) isLikelyDownloadTest(msg *netlink.ArchivalRecord) bool {
+	// Write to file
+	log := getSaverLogger()
+
 	sent, received := msg.GetStats()
 
 	// Minimum threshold: at least 100KB transferred to avoid noise
 	const minBytes = 100 * 1024
 	totalBytes := sent + received
+	
+	// Calculate ratio for logging
+	var ratio float64
+	if received == 0 {
+		if sent > 0 {
+			ratio = 999.99 // Effectively infinite
+		} else {
+			ratio = 0
+		}
+	} else {
+		ratio = float64(sent) / float64(received)
+	}
+	
 	if totalBytes < minBytes {
 		return false
 	}
 
 	// Download test heuristic: server sends significantly more than it receives
 	// Use 2x ratio to account for TCP ACKs and control messages
-	// sent > received * 2  =>  sent/received > 2
 	if received == 0 {
 		// If received is 0 but sent > minBytes, likely a download test
-		return sent >= minBytes
+		isDownload := sent >= minBytes
+		if isDownload {
+			log.Printf("[DOWNLOAD_TEST_ACCEPTED] Reason: high_sent_zero_received (sent=%d)", sent)
+		} 
+		return isDownload
 	}
 
-	ratio := float64(sent) / float64(received)
 	isDownload := ratio > 2.0
-
-	// Debug logging for first time we identify a connection as download test
-	// This helps verify the heuristic is working correctly
-	if isDownload && totalBytes < minBytes*2 {
-		// Log only when we first cross the threshold to avoid spam
-		log.Printf("Download test detected: sent=%d received=%d ratio=%.2f", sent, received, ratio)
-	}
+	
+	if isDownload {
+		log.Printf("[DOWNLOAD_TEST_ACCEPTED] Reason: ratio_exceeds_threshold (ratio=%.2f > 2.0, sent=%d, received=%d)", 
+			ratio, sent, received)
+	} 
 
 	return isDownload
 }
