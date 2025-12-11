@@ -208,6 +208,7 @@ type Saver struct {
 	Connections   map[uint64]*Connection
 	ClosingStats  map[uint64]TcpStats // BytesReceived and BytesSent for connections that are closing.
 	ClosingTotals TcpStats
+	TestTypes     map[uint64]string
 
 	cache       *cache.Cache
 	stats       stats
@@ -303,7 +304,7 @@ func (svr *Saver) queue(msg *netlink.ArchivalRecord) error {
 
 	// Write to Redis if client is available and this appears to be a download test
 	if svr.redisClient != nil {
-		if svr.isLikelyDownloadTest(msg) {
+		if testType, ok := svr.TestTypes[cookie]; ok && testType == "download" {
 			log.Printf("Is download test!")
 			connUUID := uuid.FromCookie(cookie)
 			ctx := context.Background()
@@ -548,7 +549,7 @@ func getSaverLogger() *log.Logger {
 	// Write to both stdout and file
 	multiWriter := io.MultiWriter(os.Stdout, f)
 	logger := log.New(multiWriter, "", log.LstdFlags)
-	
+
 	// Force flush after each write
 	return logger
 }
@@ -569,7 +570,7 @@ func (svr *Saver) isLikelyDownloadTest(msg *netlink.ArchivalRecord) bool {
 	// Minimum threshold: at least 100KB transferred to avoid noise
 	const minBytes = 100 * 1024
 	totalBytes := sent + received
-	
+
 	// Calculate ratio for logging
 	var ratio float64
 	if received == 0 {
@@ -581,7 +582,7 @@ func (svr *Saver) isLikelyDownloadTest(msg *netlink.ArchivalRecord) bool {
 	} else {
 		ratio = float64(sent) / float64(received)
 	}
-	
+
 	if totalBytes < minBytes {
 		return false
 	}
@@ -593,16 +594,16 @@ func (svr *Saver) isLikelyDownloadTest(msg *netlink.ArchivalRecord) bool {
 		isDownload := sent >= minBytes
 		if isDownload {
 			log.Printf("[DOWNLOAD_TEST_ACCEPTED] Reason: high_sent_zero_received (sent=%d)", sent)
-		} 
+		}
 		return isDownload
 	}
 
 	isDownload := ratio > 2.0
-	
+
 	if isDownload {
-		log.Printf("[DOWNLOAD_TEST_ACCEPTED] Reason: ratio_exceeds_threshold (ratio=%.2f > 2.0, sent=%d, received=%d)", 
+		log.Printf("[DOWNLOAD_TEST_ACCEPTED] Reason: ratio_exceeds_threshold (ratio=%.2f > 2.0, sent=%d, received=%d)",
 			ratio, sent, received)
-	} 
+	}
 
 	return isDownload
 }
