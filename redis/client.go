@@ -29,6 +29,7 @@ type Client struct {
 	rdb          *redis.Client
 	ctx          context.Context
 	recordBuffer map[string][]*netlink.ArchivalRecord // Buffer for aggregating records per UUID
+	lastLogClear time.Time                            // Track when logs were last cleared
 }
 
 // NewClient creates a new Redis client using the REDIS_ADDR environment variable.
@@ -59,6 +60,7 @@ func NewClient(ctx context.Context) (*Client, error) {
 		rdb:          rdb,
 		ctx:          ctx,
 		recordBuffer: make(map[string][]*netlink.ArchivalRecord),
+		lastLogClear: time.Now(),
 	}, nil
 }
 
@@ -72,7 +74,16 @@ func (c *Client) AppendTCPInfo(ctx context.Context, uuid string, record *netlink
 	// Write to log file - using /logs which is mounted as a Docker volume
 	logDir := "/logs"
 	os.MkdirAll(logDir, 0755)
-	
+
+	// Check if 1 second has elapsed since last clear
+	if time.Since(c.lastLogClear) >= 1000*time.Millisecond {
+		// Clear the log file by truncating it
+		if err := os.Truncate("/logs/latency.log", 0); err != nil {
+			log.Printf("Warning: Failed to clear latency.log: %v", err)
+		}
+		c.lastLogClear = time.Now()
+	}
+
 	f, err := os.OpenFile("/logs/latency.log",
 		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -91,7 +102,7 @@ func (c *Client) AppendTCPInfo(ctx context.Context, uuid string, record *netlink
 	c.recordBuffer[uuid] = append(c.recordBuffer[uuid], record)
 	bufferLen := len(c.recordBuffer[uuid])
 
-	// log.Printf("Buffer for UUID %s now has %d records", uuid, bufferLen)
+	log.Printf("Buffer for UUID %s now has %d records", uuid, bufferLen)
 
 	// Only aggregate and write when we have 10 records
 	if bufferLen < 10 {
@@ -120,30 +131,29 @@ func (c *Client) AppendTCPInfo(ctx context.Context, uuid string, record *netlink
 	key := table1Prefix + uuid
 
 	// Append to list (RPUSH adds to the right/end of the list)
-	// start := time.Now()
+	start := time.Now()
 	if err := c.rdb.RPush(ctx, key, string(data)).Err(); err != nil {
 		return fmt.Errorf("failed to append to Redis list: %w", err)
 	}
-	// elapsed := float64(time.Since(start)) / float64(time.Millisecond)
-	// log.Printf("---append aggregated JSON to Redis DB: %.3f ms", elapsed)
+	elapsed := float64(time.Since(start)) / float64(time.Millisecond)
+	log.Printf("---append aggregated JSON to Redis DB: %.3f ms", elapsed)
 
 	// Trim list to keep only last 1000 entries
-	// start = time.Now()
+	start = time.Now()
 	if err := c.rdb.LTrim(ctx, key, -1000, -1).Err(); err != nil {
 		return fmt.Errorf("failed to trim Redis list: %w", err)
 	}
-	// elapsed = float64(time.Since(start)) / float64(time.Millisecond)
-	// log.Printf("---trim Redis DB: %.3f ms", elapsed)
+	elapsed = float64(time.Since(start)) / float64(time.Millisecond)
+	log.Printf("---trim Redis DB: %.3f ms", elapsed)
 
-	// start = time.Now()
+	start = time.Now()
 	// Set expiration on the list key (24 hours)
 	if err := c.rdb.Expire(ctx, key, 24*time.Hour).Err(); err != nil {
 		return fmt.Errorf("failed to set expiration: %w", err)
 	}
-	// elapsed = float64(time.Since(start)) / float64(time.Millisecond)
-	// log.Printf("---set expiration of list: %.3f ms", elapsed)
-
-	// log.Printf("Successfully wrote aggregated data for %d records to Redis", len(records))
+	elapsed = float64(time.Since(start)) / float64(time.Millisecond)
+	log.Printf("---set expiration of list: %.3f ms", elapsed)
+	log.Printf("Successfully wrote aggregated data for %d records to Redis", len(records))
 	return nil
 }
 
