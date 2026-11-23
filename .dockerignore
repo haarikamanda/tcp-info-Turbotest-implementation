@@ -1,0 +1,6 @@
+local/
+*.sock
+logs/
+.git/
+.github/
+*.md

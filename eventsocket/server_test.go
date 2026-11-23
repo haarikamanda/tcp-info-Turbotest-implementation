@@ -66,7 +66,7 @@ func TestServer(t *testing.T) {
 		t.Error("It should be true that", before, "<", event.Timestamp, "<", after)
 	}
 	event.Timestamp = time.Time{}
-	if diff := deep.Equal(event, FlowEvent{Open, time.Time{}, "fakeuuid2", &emptyID}); diff != nil {
+	if diff := deep.Equal(event, FlowEvent{Open, time.Time{}, "fakeuuid2", &emptyID, ""}); diff != nil {
 		t.Error("Event differed from expected:", diff)
 	}
 

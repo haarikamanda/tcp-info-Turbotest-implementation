@@ -36,6 +36,7 @@ type FlowEvent struct {
 	Timestamp time.Time
 	UUID      string
 	ID        *inetdiag.SockID //`json:",omitempty"`
+	TestType  string           // "download", "upload" or ""
 }
 
 // Server is the interface that has the methods that actually serve the events
@@ -44,7 +45,7 @@ type FlowEvent struct {
 type Server interface {
 	Listen() error
 	Serve(context.Context) error
-	FlowCreated(timestamp time.Time, uuid string, sockid inetdiag.SockID)
+	FlowCreated(timestamp time.Time, uuid string, sockid inetdiag.SockID, testType ...string)
 	FlowDeleted(timestamp time.Time, uuid string)
 }
 
@@ -166,12 +167,17 @@ func (s *server) Serve(ctx context.Context) error {
 }
 
 // FlowCreated should be called whenever tcpinfo notices a new flow is created.
-func (s *server) FlowCreated(timestamp time.Time, uuid string, id inetdiag.SockID) {
+func (s *server) FlowCreated(timestamp time.Time, uuid string, id inetdiag.SockID, testType ...string) {
+	tt := ""
+	if len(testType) > 0 {
+		tt = testType[0]
+	}
 	s.eventC <- &FlowEvent{
 		Event:     Open,
 		Timestamp: timestamp,
 		ID:        &id,
 		UUID:      uuid,
+		TestType:  tt,
 	}
 	metrics.FlowEventsCounter.WithLabelValues("open").Inc()
 }
@@ -198,10 +204,10 @@ func New(filename string) Server {
 type nullServer struct{}
 
 // Empty implementations that do no harm.
-func (nullServer) Listen() error                                                    { return nil }
-func (nullServer) Serve(context.Context) error                                      { return nil }
-func (nullServer) FlowCreated(timestamp time.Time, uuid string, id inetdiag.SockID) {}
-func (nullServer) FlowDeleted(timestamp time.Time, uuid string)                     {}
+func (nullServer) Listen() error                                                             { return nil }
+func (nullServer) Serve(context.Context) error                                               { return nil }
+func (nullServer) FlowCreated(timestamp time.Time, uuid string, id inetdiag.SockID, testType ...string) {}
+func (nullServer) FlowDeleted(timestamp time.Time, uuid string)                              {}
 
 // NullServer returns a Server that does nothing. It is made so that code that
 // may or may not want to use a eventsocket can receive a Server interface and
